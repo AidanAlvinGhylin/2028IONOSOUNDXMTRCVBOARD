@@ -1,3 +1,12 @@
+//  NMEADataClockingTestKF8DIA.ino
+
+//  This code is intended to run on the Teensy 4.0 on the COSTAS XMT/RCV Board Ver 1.20, built by John Gibbons N8OBJ.
+
+//  Revision History
+//  Rev #   Date        Author      Description
+//  1.0     10-11-26    KF8DIA      Initial code working.
+//  1.10    10-12-26    KF8DIA      Changed NMEA data sentence RX storage structure. Instead of using std::strings to store everything, we utilize char arrays that we overwrite to prevent memory exhaust issues.
+
 #include <_Teensy.h>
 #include <iostream>
 #include <string>
@@ -45,11 +54,11 @@ volatile bool transmission_active = false;                                    //
 std::array<int, 8> RX_buffer = {};
 volatile int RX_buffer_pointer = 0;
 
+volatile bool NMEA_sentence_complete = false;                         //  Flag to determine when we have received a full sentence.
 std::vector<uint8_t> NMEA_bytes;
-volatile uint8_t next_NMEA_byte = 0;
-std::string current_sentence = "";                                            //  Used to construct the NMEA sentence coming in from the GPS receiver.
-std::string previous_sentence = "";                                           //  Used to store the previous NMEA sentence after it is fully constructed and verified. Used for data extraction.
-volatile bool byte_available = false;
+char current_sentence[100];                                            //  Used to construct the NMEA sentence coming in from the GPS receiver.
+char previous_sentence[100];                                           //  Used to store the previous NMEA sentence after it is fully constructed and verified. Used for data extraction.
+volatile int current_sentence_index = 0;                              //  Used to point to the current positioon in the current_sentence char array
 volatile uint8_t received_byte;
 
 //  NMEA byte transmitting structure.
@@ -64,13 +73,19 @@ volatile bool GPS_TX_stop_bit = false;                                        //
 volatile bool process_GPS_RX_byte = false;                                    //  Flag to indicate whether a full byte has been received and needs to be processed.
 volatile bool load_GPS_TX_byte = false;
 
-//  Used to regulate information extraction from NMEA data from the GPS receiver.
-std::string extracted_UTC_second_string = "";
-volatile bool NMEA_sentence_complete = false;
-
 //  Used to store information from the NMEA sentences from the GPS receiver.
+//  Hour decoding
+volatile int current_hour = -1;
+volatile int next_hour = -1;
+std::string extracted_hour;
+//  Minute decoding
+volatile int current_minute = -1;
+volatile int next_minute = -1;
+std::string extracted_minute;
+//  Second decoding
 volatile int current_second = -1;                                             
 volatile int next_second = -1;
+std::string extracted_second;
 
 //  Test tone list
 std::array<int, 6> tone_FTWs = {1717986, 3435973, 5153960, 6871947, 8589934, 10307921};
@@ -98,6 +113,11 @@ void setup() {
 
   Serial.begin(115200);
 
+  //  This is used for piecing together the UTC values from the NMEA data. We reserve two data bytes for each number at the beginning of the program.
+  extracted_hour.reserve(2);
+  extracted_minute.reserve(2);
+  extracted_second.reserve(2);
+
   Serial.println("------------------------------");
   Serial.println("NMEADataClockingTestKF8DIA.ino");
   Serial.println("------------------------------");
@@ -114,6 +134,19 @@ void PPS_ISR() {
   GPS_fix_PPS_counter++;
 
   current_second = next_second;
+  if (current_minute != next_minute) {
+    current_minute = next_minute;
+  }
+  if (current_hour != next_hour) {
+    current_hour = next_hour;
+  }
+
+  Serial.print("Updated UTC time to: ");
+  Serial.print(current_hour);
+  Serial.print(":");
+  Serial.print(current_minute);
+  Serial.print(":");
+  Serial.println(current_second);
 
   //  Temporarily commenting this out as the Teensy is having problems that I am figuring out
   // current_second = next_second;
@@ -165,16 +198,18 @@ void GPS_RX_ISR() {
   if (RX_buffer_pointer == RX_buffer.size()) {                  
     GPS_RX_timer.end();                                                       //  Stop the timer if that is the case.
     RX_buffer_pointer = 0;                                                    //  Reset the RX buffer pointer.
-    received_byte = construct_byte(RX_buffer);                                //  Construct the byte value from the eight bits.
-    process_GPS_RX_byte = true;                                               //  Set a flag that indicates that a full byte has been received and needs to be processed.
     GPIO7_ISR = PIN_7_MASK;                                                   //  Set the ISR bit corresponding to the interrupt on pin 7.
     GPIO7_IMR |= PIN_7_MASK;                                                  //  Also the IMR bit corresponding to the interrupt on pin 7, so that we interrupt on the next start bit.
+    received_byte = construct_byte(RX_buffer);
+
     if (received_byte == 36) {
       NMEA_sentence_complete = true;
-      previous_sentence = current_sentence;
-      current_sentence = "";
+      current_sentence[current_sentence_index] = '\0';                        //  Null termination.
+      memcpy(previous_sentence, current_sentence, 100);
+      current_sentence_index = 0;
     }
-    current_sentence += (char) received_byte;
+    current_sentence[current_sentence_index] = received_byte;
+    current_sentence_index++;
   }
 }
 
@@ -302,11 +337,40 @@ void toggle_AD9850_FQ_UD() {
 
 void loop() {
   if (NMEA_sentence_complete) {
-    const int extracted_second = std::stoi(previous_sentence.substr(11, 2));
-    if (next_second != ((extracted_second + 1) % 60)) {
-      next_second = (extracted_second + 1) % 60;
+    // extracted_second = (int)(previous_sentence[11] + previous_sentence[12]);
+
+    //  This avoids memory reallocation
+    extracted_hour.push_back(previous_sentence[7]);
+    extracted_hour.push_back(previous_sentence[8]);
+    extracted_minute.push_back(previous_sentence[9]);
+    extracted_minute.push_back(previous_sentence[10]);
+    extracted_second.push_back(previous_sentence[11]);
+    extracted_second.push_back(previous_sentence[12]);
+
+    next_second = (std::stoi(extracted_second) + 1) % 60;
+    if (next_second == 0) {
+      next_minute = (std::stoi(extracted_minute) + 1) % 60;
+      if (next_minute == 0) {
+        next_hour = (std::stoi(extracted_hour) + 1) % 24;
+      }
+      else {
+        next_hour = std::stoi(extracted_hour);
+      }
     }
+    else {
+      next_minute = std::stoi(extracted_minute);
+      next_hour = std::stoi(extracted_hour);
+    }
+    extracted_hour.clear();
+    extracted_minute.clear();
+    extracted_second.clear();
+
+    // NMEA_sentence_complete = false;
     NMEA_sentence_complete = false;
+    // for (int i = 0; i < sizeof(previous_sentence); i++) {
+    //   Serial.print(previous_sentence[i]);
+    // }
+    // Serial.println();
   }
   if (new_second) {
     // Serial.println("Detected new_second == true in loop()");
