@@ -192,8 +192,8 @@ void setup() {
 }
 
 void PPS_ISR() {
-  Serial.print("Entering PPS_ISR() with next_minute = ");
-  Serial.println(next_minute);
+  // Serial.print("Entering PPS_ISR() with next_minute = ");
+  // Serial.println(next_minute);
   // Serial.print("Entered PPS_ISR(). transmission_active = ");
   // Serial.println(transmission_active);
   //  This value needs to be incremented every time, whether we have a GPS signal or not.
@@ -207,12 +207,12 @@ void PPS_ISR() {
   current_minute = next_minute;
   current_hour = next_hour;
 
-  Serial.print("Updated UTC time to ");
-  Serial.print(current_hour);
-  Serial.print(":");
-  Serial.print(current_minute);
-  Serial.print(":");
-  Serial.println(current_second);
+  // Serial.print("Updated UTC time to ");
+  // Serial.print(current_hour);
+  // Serial.print(":");
+  // Serial.print(current_minute);
+  // Serial.print(":");
+  // Serial.println(current_second);
 
   // Serial.print("Previous time: ");
   // Serial.print(previous_minute);
