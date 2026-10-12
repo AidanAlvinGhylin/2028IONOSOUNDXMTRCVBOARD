@@ -6,6 +6,7 @@
 //  Rev #     Date      Author      Description
 //  1.0       10-8-26   KF8DIA      Initial code working with hard fault detection.
 //  1.10      10-8-26   KF8DIA      Implemented watchdog timer; still working out heap allocation faults.
+//  1.20      10-12-16  KF8DIA      First attempt at solving heap allocation faults; used char array instead of std::string to compile bytes for NMEA sentences.
 
 #include <_Teensy.h>
 #include <Arduino.h>
@@ -59,11 +60,9 @@ volatile bool transmission_active = false;                                    //
 std::array<int, 8> RX_buffer = {};
 volatile int RX_buffer_pointer = 0;
 
-volatile uint8_t next_NMEA_byte = 0;
-volatile char current_sentence[90];                                          //  Fixed 90-byte array, used to construct the NMEA sentence coming in from the GPS receiver.
-volatile char previous_sentence[90];                                         //  Fixed 90-byte array, used to store the previous NMEA sentence after it is fully constructed and verified. Used for data extraction.
-volatile int sentence_index = 0;                                              //  Tracks the position within current_sentence we're appending the received byte to through the GPS RX process.
-volatile bool byte_available = false;
+volatile char current_sentence[100];                                          //  Fixed 100-byte array, used to construct the NMEA sentence coming in from the GPS receiver.
+volatile char previous_sentence[100];                                         //  Fixed 100-byte array, used to store the previous NMEA sentence after it is fully constructed and verified. Used for data extraction.
+volatile int current_sentence_index = 0;                                      //  Tracks the position within current_sentence we're appending the received byte to through the GPS RX process.
 volatile uint8_t received_byte;
 
 //  NMEA byte transmitting structure.
@@ -83,12 +82,23 @@ std::string extracted_UTC_second_string = "";
 volatile bool NMEA_sentence_complete = false;
 
 //  Used to store information from the NMEA sentences from the GPS receiver.
+//  Second values
 volatile int current_second = -1;                                             
 volatile int next_second = -1;
 volatile int previous_second = -1;
+std::string extracted_second;
+//  Minute values
 volatile int current_minute = -1;
 volatile int next_minute = -1;
 volatile int previous_minute = -1;
+std::string extracted_minute;
+//  Hour values
+volatile int current_hour = -1;
+volatile int next_hour = -1;
+volatile int previous_hour = -1;
+std::string extracted_hour;
+
+//  Boolean that indicates whether the system thinks it is tracking real time; used for fault detection
 volatile bool time_lock = false;
 
 //  Carrier frequency and phase tuning word definitions
@@ -130,6 +140,11 @@ volatile bool system_fault_flag = false;
 volatile bool loop_started_running = false;
 volatile bool loop_stopped_running = false;
 
+//  Timestamp for when the system faulted, in case the watchdog timer still isn't working
+volatile int fault_hour = -1;
+volatile int fault_minute = -1;
+volatile int fault_second = -1;
+
 void setup() {
   // put your setup code here, to run once:
   attachInterrupt(GPS_RX_pin, GPS_RX_start, FALLING);
@@ -150,11 +165,16 @@ void setup() {
   pinMode(19, OUTPUT);
   pinMode(20, OUTPUT);
 
+  //  Reserve memory space for the extracted UTC values, to avoid heap allocation problems
+  extracted_minute.reserve(2);
+  extracted_second.reserve(2);
+  extracted_hour.reserve(2);
+
   Serial.begin(115200);
 
-  // Serial.println("------------------------------");
-  // Serial.println("2028XMITBoardKF8DIA.ino Rev. 1.0");
-  // Serial.println("------------------------------");
+  Serial.println("------------------------------");
+  Serial.println("2027XMITBoardKF8DIA.ino Rev. 1.0");
+  Serial.println("------------------------------");
 
   load_GPS_TX_buffer("$PMTK314,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0*29\r\n");                              //  PMTK314 (sets NMEA output) to only Global Positioning Fix Data (GGA) sentences
   load_GPS_TX_buffer("$PMTK220,100*2F\r\n"); 
@@ -172,6 +192,8 @@ void setup() {
 }
 
 void PPS_ISR() {
+  Serial.print("Entering PPS_ISR() with next_minute = ");
+  Serial.println(next_minute);
   // Serial.print("Entered PPS_ISR(). transmission_active = ");
   // Serial.println(transmission_active);
   //  This value needs to be incremented every time, whether we have a GPS signal or not.
@@ -179,9 +201,18 @@ void PPS_ISR() {
 
   previous_second = current_second;
   previous_minute = current_minute;
+  previous_hour = current_hour;
 
   current_second = next_second;
   current_minute = next_minute;
+  current_hour = next_hour;
+
+  Serial.print("Updated UTC time to ");
+  Serial.print(current_hour);
+  Serial.print(":");
+  Serial.print(current_minute);
+  Serial.print(":");
+  Serial.println(current_second);
 
   // Serial.print("Previous time: ");
   // Serial.print(previous_minute);
@@ -199,8 +230,8 @@ void PPS_ISR() {
   // Serial.println(system_fault_flag);
   // Serial.println("--------------------------------");
 
-  if (current_second != (previous_second + 1) % 60 && (previous_minute != -1 && previous_second != -1)) {
-    system_fault_flag = true;
+  if (current_second != (previous_second + 1) % 60 && (previous_minute != -1 && previous_second != -1 && previous_hour != -1)) {
+    raise_fault_flag();
   }
 
   //  Temporarily commenting this out as the Teensy is having problems that I am figuring out
@@ -213,7 +244,7 @@ void PPS_ISR() {
         bool status = station_ID_timer.begin(station_ID_ISR, 49000);
         if (!status) {
           Serial.println("station_ID_timer failed to start");
-          system_fault_flag = true;
+          raise_fault_flag();
         }
         load_AD9850_registers(station_ID_freqs[1], 192);
         station_ID_index++;
@@ -223,14 +254,14 @@ void PPS_ISR() {
         bool status = UTC_tick_timer.begin(UTC_tick_ISR, 800000);
         if (!status) {
           Serial.println("UTC_tick_timer failed to start");
-          system_fault_flag = true;
+          raise_fault_flag();
         }
       }
       else {
         bool status = UTC_tick_timer.begin(UTC_tick_ISR, 5000);
         if (!status) {
           Serial.println("UTC_tick_timer failed to start");
-          system_fault_flag = true;
+          raise_fault_flag();
         }
       }
       load_AD9850_registers(0, 192);
@@ -264,7 +295,7 @@ void PPS_ISR() {
   }
   else {
     // Serial.println("main loop stopped running");
-    system_fault_flag = true;
+    raise_fault_flag();
     digitalWrite(LED_indicator_red, 1);
     digitalWrite(LED_indicator_green, 0);
     digitalWrite(LED_indicator_blue, 0);
@@ -288,6 +319,9 @@ void GPS_fix_ISR() {
     toggle_AD9850_FQ_UD();                
     load_AD9850_registers(0, 192);
     toggle_AD9850_FQ_UD();
+    previous_hour = -1;
+    current_hour = -1;
+    next_hour = -1;
     previous_minute = -1;
     current_minute = -1;
     next_minute = -1;
@@ -309,7 +343,7 @@ void GPS_RX_start() {
   bool status = GPS_RX_timer.begin(GPS_RX_ISR, 156);                          //  Begin the GPS_RX_ISR function at 156 us, which is 1.5 times the length of a single bit
   if (!status) {
     Serial.println("GPS RX failed to start");
-    system_fault_flag = true;
+    raise_fault_flag();
   }
   GPS_RX_timer.update(104);                                                   //  The GPS_RX_ISR should fire after 156 us for the first bit, and then after 104 us for all subsequent bits.
 }
@@ -321,24 +355,19 @@ void GPS_RX_ISR() {
   if (RX_buffer_pointer == RX_buffer.size()) {                  
     GPS_RX_timer.end();                                                       //  Stop the timer if that is the case.
     RX_buffer_pointer = 0;                                                    //  Reset the RX buffer pointer.
-    received_byte = construct_byte(RX_buffer);                                //  Construct the byte value from the eight bits.
-    process_GPS_RX_byte = true;                                               //  Set a flag that indicates that a full byte has been received and needs to be processed.
     GPIO7_ISR = PIN_7_MASK;                                                   //  Set the ISR bit corresponding to the interrupt on pin 7.
     GPIO7_IMR |= PIN_7_MASK;                                                  //  Also the IMR bit corresponding to the interrupt on pin 7, so that we interrupt on the next start bit.
+
+    received_byte = construct_byte(RX_buffer);                                //  Construct the byte value from the eight bits.
     if (received_byte == 36) {
       NMEA_sentence_complete = true;
-      if (sentence_index < 90) {
-        current_sentence[sentence_index] = '\0';
-      }
-      else {
-        current_sentence[89] = '\0';
-      }
+      current_sentence[current_sentence_index] = '\0';                        //  Null terminate the current sentence.
 
-      memcpy(previous_sentence, current_sentence, sizeof(current_sentence));
-      sentence_index = 0;
+      memcpy(previous_sentence, current_sentence, 100);
+      current_sentence_index = 0;
     }
-    current_sentence[sentence_index] = (char) received_byte;
-    sentence_index++;
+    current_sentence[current_sentence_index] = (char) received_byte;
+    current_sentence_index++;
   }
 }
 
@@ -419,7 +448,7 @@ void load_GPS_TX_buffer(const std::string msg) {
     bool status = GPS_TX_timer.begin(GPS_TX_ISR, 104);             //  Begin the GPS_TX_timer at 104 us (the period corresponding to 9600 baud)
     if (!status) {
       Serial.println("GPS TX failed to start");
-      system_fault_flag = true;
+      raise_fault_flag();
     }
   }
 
@@ -465,7 +494,7 @@ void UTC_tick_ISR() {
   bool status = timed_silence_timer.begin(timed_silence_ISR, 95000);
   if (!status) {
     Serial.println("timed silence failed to start");
-    system_fault_flag = true;
+    raise_fault_flag();
   }
   guarding_silence = true;
   phase_reset();
@@ -480,7 +509,7 @@ void timed_silence_ISR() {
     bool status = BARKER_code_timer.begin(BARKER_code_ISR, 65000);
     if (!status) {
       Serial.println("BARKER code failed to start");
-      system_fault_flag = true;
+      raise_fault_flag();
     }
     BARKER_code_XMIT_flag = false;
   }
@@ -490,7 +519,7 @@ void timed_silence_ISR() {
     bool status = COSTAS_array_timer.begin(COSTAS_array_ISR, 40000);
     if (!status) {
       Serial.println("COSTAS array failed to start");
-      system_fault_flag = true;
+      raise_fault_flag();
     }
     COSTAS_array_XMIT_flag = false;
   }
@@ -500,7 +529,7 @@ void timed_silence_ISR() {
     bool status = constant_audio_timer.begin(constant_audio_ISR, 800000);
     if (!status) {
       Serial.println("constant audio failed to start");
-      system_fault_flag = true;
+      raise_fault_flag();
     }
     constant_audio_XMIT_flag = false;
     load_AD9850_registers(0, 192);
@@ -666,7 +695,7 @@ void phase_reset() {
 void wdog1_init(uint8_t timeout) {
   WDOG1_WMCR = 0;                     //  Reset this bit to make sure we avoid an unintended initialization timeout.
   WDOG1_WCR = (timeout << 8) | 27;    //  Set the watchdog control register to store the timeout value, and to set bit 4 (resets the system on watchdog timeout), bit 1 (software reset enable), and bit 0 (watchdog timer enable)
-  Serial.println("Initializing WDT1");
+  // Serial.println("Initializing WDT1");
 }
 
 //  Services the watchdog timer
@@ -677,12 +706,20 @@ void wdog1_serv() {
   WDOG1_WSR = 21845;                  //  Set the WSR to 0x5555
   WDOG1_WSR = 43690;                  //  Set the WSR to 0xAAAA
   __enable_irq();
-  Serial.println("Servicing WDT1");
+  // Serial.println("Servicing WDT1");
 }
 
 //  Routine to assert a chip reset in software
 void wdog1_software_reset() {
   WDOG1_WCR &= 65533;                 //  Reset bit 0 of the WCR to assert a reset from software.
+}
+
+//  Helper routine to raise and timestamp the system fault flag
+void raise_fault_flag() {
+  system_fault_flag = true;
+  fault_hour = current_hour;
+  fault_minute = current_minute;
+  fault_second = current_second;
 }
 
 void loop() {
@@ -691,17 +728,35 @@ void loop() {
 
   // Serial.println("Entering loop()");
   if (NMEA_sentence_complete) {
-    const int extracted_second = (int)(previous_sentence[11] + previous_sentence[12]);
-    const int extracted_minute = (int)(previous_sentence[9] + previous_sentence[10]);
-    if (next_minute == -1) {
-      next_minute = extracted_minute;
-    }
-    if (next_second != ((extracted_second + 1) % 60)) {
-      next_second = (extracted_second + 1) % 60;
-    }
+    extracted_hour.push_back(previous_sentence[7]);
+    extracted_hour.push_back(previous_sentence[7]);
+    extracted_minute.push_back(previous_sentence[9]);
+    extracted_minute.push_back(previous_sentence[10]);
+    extracted_second.push_back(previous_sentence[11]);
+    extracted_second.push_back(previous_sentence[12]);
+
+    next_second = (std::stoi(extracted_second) + 1) % 60;
     if (next_second == 0) {
-      next_minute = (next_minute + 1) % 60;
+      // Serial.println("Detected that next_second == 0");
+      next_minute = (std::stoi(extracted_minute) + 1) % 60;
+      // Serial.print("Setting next_minute to ");
+      // Serial.println(next_minute);
+      if (next_minute == 0) {
+        next_hour = (std::stoi(extracted_hour) + 1) % 60;
+      }
+      else {
+        next_hour = std::stoi(extracted_hour);
+      }
     }
+    else {
+      next_minute = std::stoi(extracted_minute);
+      next_hour = std::stoi(extracted_hour);
+    }
+
+    extracted_hour.clear();
+    extracted_minute.clear();
+    extracted_second.clear();
+
     NMEA_sentence_complete = false;
   }
   if (transmission_active) {
@@ -718,6 +773,12 @@ void loop() {
     digitalWrite(LED_indicator_red, 1);
     digitalWrite(LED_indicator_green, 0);
     digitalWrite(LED_indicator_blue, 0);
-    Serial.println("System fault flag raised, we shouldn't be servicing the WDT1 until the chip is reset.");
+    // Serial.println("System fault flag raised, we shouldn't be servicing the WDT1 until the chip is reset.");
+    Serial.print("System faulted at ");
+    Serial.print(fault_hour);
+    Serial.print(":");
+    Serial.print(fault_minute);
+    Serial.print(":");
+    Serial.println(fault_second);
   }
 }
