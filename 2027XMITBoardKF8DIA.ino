@@ -7,6 +7,7 @@
 //  1.0       10-8-26   KF8DIA      Initial code working with hard fault detection.
 //  1.10      10-8-26   KF8DIA      Implemented watchdog timer; still working out heap allocation faults.
 //  1.20      10-12-16  KF8DIA      First attempt at solving heap allocation faults; used char array instead of std::string to compile bytes for NMEA sentences.
+//  1.30      10-12-16  KF8DIA      Repaired WDT1 software reset routine to reset the system in the event of a hard fault.
 
 #include <_Teensy.h>
 #include <Arduino.h>
@@ -299,6 +300,13 @@ void PPS_ISR() {
     digitalWrite(LED_indicator_red, 1);
     digitalWrite(LED_indicator_green, 0);
     digitalWrite(LED_indicator_blue, 0);
+    Serial.print("System faulted at ");
+    Serial.print(fault_hour);
+    Serial.print(":");
+    Serial.print(fault_minute);
+    Serial.print(":");
+    Serial.println(fault_second);
+    wdog1_software_reset();
   }
 
   //  If we have a GPS lock, we service the watchdog timer to ensure that as long as the system fault flag is not raised, we are servicing it once per second.
@@ -711,7 +719,8 @@ void wdog1_serv() {
 
 //  Routine to assert a chip reset in software
 void wdog1_software_reset() {
-  WDOG1_WCR &= 65533;                 //  Reset bit 0 of the WCR to assert a reset from software.
+  Serial.println("Attempting to assert WDT1 software reset...");
+  WDOG1_WCR &= ~(1 << 4);                 //  Reset bit 1 of the WCR to assert a reset from software.
 }
 
 //  Helper routine to raise and timestamp the system fault flag
@@ -780,5 +789,6 @@ void loop() {
     Serial.print(fault_minute);
     Serial.print(":");
     Serial.println(fault_second);
+    wdog1_software_reset();
   }
 }
