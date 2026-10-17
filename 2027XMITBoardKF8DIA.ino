@@ -9,6 +9,8 @@
 //  1.20      10-12-26  KF8DIA      First attempt at solving heap allocation faults; used char array instead of std::string to compile bytes for NMEA sentences.
 //  1.30      10-12-26  KF8DIA      Repaired WDT1 software reset routine to reset the system in the event of a hard fault.
 //  1.40      10-17-26  KF8DIA      Fixed issue with resetting XMIT bit when GPS signal is lost.
+//  1.50      10-17-26  KF8DIA      Modified PTT control to where we don't reset the XMIT when we're resetting the phase. I was doing this because I was previously hearing
+//                                  pulses caused by the phase resets, but I think this was before I started resetting the phase to 270 instead of 0.
 
 #include <_Teensy.h>
 #include <Arduino.h>
@@ -477,7 +479,7 @@ void station_ID_ISR() {
   toggle_AD9850_FQ_UD();
   
   if (station_ID_stop_flag) {
-    digitalWrite(XMIT, LOW);
+    // digitalWrite(XMIT, LOW);
     station_ID_timer.end();
     station_ID_index = 0;
     station_ID_stop_flag = false;
@@ -498,7 +500,7 @@ void station_ID_ISR() {
 
 void UTC_tick_ISR() {
   toggle_AD9850_FQ_UD();
-  digitalWrite(XMIT, LOW);
+  // digitalWrite(XMIT, LOW);
   UTC_tick_timer.end();
   bool status = timed_silence_timer.begin(timed_silence_ISR, 95000);
   if (!status) {
@@ -511,7 +513,7 @@ void UTC_tick_ISR() {
 
 void timed_silence_ISR() {
   timed_silence_timer.end();
-  digitalWrite(XMIT, HIGH);
+  // digitalWrite(XMIT, HIGH);
   if (BARKER_code_XMIT_flag) {
     // Serial.println("Beginning BARKER transmission");
     BARKER_code_ISR();
@@ -548,7 +550,7 @@ void timed_silence_ISR() {
 void BARKER_code_ISR() {
   toggle_AD9850_FQ_UD();
   if (BARKER_code_stop_flag) {
-    digitalWrite(XMIT, LOW);
+    // digitalWrite(XMIT, LOW);
     BARKER_code_timer.end();
     BARKER_code_index = 0;
     BARKER_code_stop_flag = false;
@@ -570,7 +572,7 @@ void BARKER_code_ISR() {
 void COSTAS_array_ISR() {
   toggle_AD9850_FQ_UD();
   if (COSTAS_array_stop_flag) {
-    digitalWrite(XMIT, LOW);
+    // digitalWrite(XMIT, LOW);
     COSTAS_array_timer.end();
     COSTAS_array_index = 0;
     COSTAS_array_stop_flag = false;
@@ -590,7 +592,7 @@ void COSTAS_array_ISR() {
 }
 
 void constant_audio_ISR() {
-  digitalWrite(XMIT, LOW);
+  // digitalWrite(XMIT, LOW);
   toggle_AD9850_FQ_UD();
   constant_audio_timer.end();
   phase_reset();
