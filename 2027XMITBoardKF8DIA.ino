@@ -6,8 +6,9 @@
 //  Rev #     Date      Author      Description
 //  1.0       10-8-26   KF8DIA      Initial code working with hard fault detection.
 //  1.10      10-8-26   KF8DIA      Implemented watchdog timer; still working out heap allocation faults.
-//  1.20      10-12-16  KF8DIA      First attempt at solving heap allocation faults; used char array instead of std::string to compile bytes for NMEA sentences.
-//  1.30      10-12-16  KF8DIA      Repaired WDT1 software reset routine to reset the system in the event of a hard fault.
+//  1.20      10-12-26  KF8DIA      First attempt at solving heap allocation faults; used char array instead of std::string to compile bytes for NMEA sentences.
+//  1.30      10-12-26  KF8DIA      Repaired WDT1 software reset routine to reset the system in the event of a hard fault.
+//  1.40      10-17-26  KF8DIA      Fixed issue with resetting XMIT bit when GPS signal is lost.
 
 #include <_Teensy.h>
 #include <Arduino.h>
@@ -79,7 +80,6 @@ volatile bool process_GPS_RX_byte = false;                                    //
 volatile bool load_GPS_TX_byte = false;
 
 //  Used to regulate information extraction from NMEA data from the GPS receiver.
-std::string extracted_UTC_second_string = "";
 volatile bool NMEA_sentence_complete = false;
 
 //  Used to store information from the NMEA sentences from the GPS receiver.
@@ -327,6 +327,7 @@ void GPS_fix_ISR() {
     toggle_AD9850_FQ_UD();                
     load_AD9850_registers(0, 192);
     toggle_AD9850_FQ_UD();
+    digitalWrite(XMIT, LOW);
     previous_hour = -1;
     current_hour = -1;
     next_hour = -1;
