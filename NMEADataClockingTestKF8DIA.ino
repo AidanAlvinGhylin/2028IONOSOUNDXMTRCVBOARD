@@ -6,6 +6,7 @@
 //  Rev #   Date        Author      Description
 //  1.0     10-11-26    KF8DIA      Initial code working.
 //  1.10    10-12-26    KF8DIA      Changed NMEA data sentence RX storage structure. Instead of using std::strings to store everything, we utilize char arrays that we overwrite to prevent memory exhaust issues.
+//  1.20    10-17-26    KF8DIA      We weren't actually configuring the NMEA data coming from the Adafruit GPS. Implemented this.
 
 #include <_Teensy.h>
 #include <iostream>
@@ -125,6 +126,8 @@ void setup() {
   load_GPS_TX_buffer("$PMTK314,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0*29\r\n");                              //  PMTK314 (sets NMEA output) to only Global Positioning Fix Data (GGA) sentences
   load_GPS_TX_buffer("$PMTK220,100*2F\r\n"); 
 
+  digitalWrite(GPS_TX_pin, HIGH);
+
   digitalWrite(AD9850_SGRST, HIGH);
   digitalWrite(AD9850_SGRST, LOW);
 }
@@ -201,13 +204,14 @@ void GPS_RX_ISR() {
     GPIO7_ISR = PIN_7_MASK;                                                   //  Set the ISR bit corresponding to the interrupt on pin 7.
     GPIO7_IMR |= PIN_7_MASK;                                                  //  Also the IMR bit corresponding to the interrupt on pin 7, so that we interrupt on the next start bit.
     received_byte = construct_byte(RX_buffer);
-
     if (received_byte == 36) {
+      // Serial.println();
       NMEA_sentence_complete = true;
       current_sentence[current_sentence_index] = '\0';                        //  Null termination.
       memcpy(previous_sentence, current_sentence, 100);
       current_sentence_index = 0;
     }
+    // Serial.print((char) received_byte);
     current_sentence[current_sentence_index] = received_byte;
     current_sentence_index++;
   }
@@ -224,21 +228,23 @@ uint8_t construct_byte(const std::array<int, 8>& bits) {
 }
 
 void GPS_TX_ISR() {
+  // Serial.println("Entering GPS_TX_ISR().");
   //  First check to see if TX_buffer_bits has bits that need to be transmitted
   if (TX_buffer_bits_filled) {
     //  Toggle FreqUp_diagnostic_pin if we're transmitting a data bit
     // digitalWrite(FreqUp_diagnostic_pin, HIGH);
 
     int current_bit = TX_buffer_bits[TX_buffer_bits_pointer];
-    digitalWrite(GPS_RX_pin, current_bit);
+    digitalWrite(GPS_TX_pin, current_bit);
     TX_buffer_bits_pointer++;
     if (TX_buffer_bits_pointer >= TX_buffer_bits.size()) {
       TX_buffer_bits_filled = false;                                            //  Reset this flag to indicate we're done transmitting the current byte
       GPS_TX_stop_bit = true;                                                 //  Make sure we transmit a stop bit afterwards.
     }
     // Serial.print("Transmitting bit ");
-    // Serial.println(TX_buffer_bits_pointer - 1);
-
+    // Serial.print(TX_buffer_bits_pointer - 1);
+    // Serial.print(": ");
+    // Serial.println(current_bit);
     // digitalWrite(FreqUp_diagnostic_pin, LOW);
   }
   //  Otherwise, check if we just finished transmitting 8 data bits and need to transmit a stop bit.
@@ -246,7 +252,7 @@ void GPS_TX_ISR() {
     //  Toggle FreqDown_diagnostic_pin if we're transmitting a stop bit
     // digitalWrite(FreqDown_diagnostic_pin, HIGH);
 
-    digitalWrite(GPS_RX_pin, HIGH);                                               //  The stop bit should always be a 1.
+    digitalWrite(GPS_TX_pin, HIGH);                                               //  The stop bit should always be a 1.
     GPS_TX_stop_bit = false;                                                  //  Reset this flag
     // Serial.println("Transmitting STOP BIT");
 
@@ -255,9 +261,9 @@ void GPS_TX_ISR() {
   //  Otherwise, check if TX_buffer_bytes has any bytes that need to be transmitted. We first transmit a start bit and load TX_buffer_bits with the first byte in TX_buffer bytes.
   else if (!TX_buffer_bytes.empty() && !load_GPS_TX_byte) {
     //  Toggle FreqDown_diagnostic_pin if we're transmitting a start bit
-    // digitalWrite(FreqDown_diagnostic_pin, HIGH);
+    // digitalWrite(FreqDown_diagnostic_pin,p HIGH);
 
-    digitalWrite(GPS_RX_pin, LOW);                                                //  The start bit should always be a 0.
+    digitalWrite(GPS_TX_pin, LOW);                                                //  The start bit should always be a 0.
     load_GPS_TX_byte = true;                                                    //  Set a flag that indicates that the TX buffer should be loaded with the bits for the next byte.
     // GPS_TX_start_bit = false;                                                 //  Reset this flag
     // Serial.println("Transmitting START BIT");
@@ -274,11 +280,14 @@ void GPS_TX_ISR() {
 void load_GPS_TX_buffer(const std::string msg) {
   //  Toggle FreqDown diagnostic pin when loading the TX buffer
   // digitalWrite(FreqDown_diagnostic_pin, HIGH);
-
+  // Serial.println("Entering load_GPS_TX_buffer()");
+  // Serial.print("Loading TX_buffer_bytes:");
   for (char c : msg) {
     uint8_t corresponding_byte = (uint8_t) c;                                         //  Convert the ASCII character to a byte
     TX_buffer_bytes.push_back(corresponding_byte);                                  //  Load this byte into the TX buffer
+    // Serial.print(c);
   }
+  // Serial.println();
 
   //  Add carriage return and line feed
   TX_buffer_bytes.push_back((uint8_t) 13);                                    //  Carriage return
@@ -367,10 +376,18 @@ void loop() {
 
     // NMEA_sentence_complete = false;
     NMEA_sentence_complete = false;
-    // for (int i = 0; i < sizeof(previous_sentence); i++) {
-    //   Serial.print(previous_sentence[i]);
-    // }
+    for (int i = 0; i < sizeof(previous_sentence); i++) {
+      // Serial.print(previous_sentence[i]);
+    }
     // Serial.println();
+  }
+  if (load_GPS_TX_byte) {
+    uint8_t byte_to_load = TX_buffer_bytes.front();
+    // Serial.print("Loading character: ");
+    // Serial.println((char) byte_to_load);
+    TX_buffer_bytes.erase(TX_buffer_bytes.begin());
+    load_TX_buffer_bits(byte_to_load);
+    load_GPS_TX_byte = false;
   }
   if (new_second) {
     // Serial.println("Detected new_second == true in loop()");
