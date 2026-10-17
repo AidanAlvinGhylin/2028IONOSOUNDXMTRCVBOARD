@@ -11,6 +11,7 @@
 //  1.40      10-17-26  KF8DIA      Fixed issue with resetting XMIT bit when GPS signal is lost.
 //  1.50      10-17-26  KF8DIA      Modified PTT control to where we don't reset the XMIT when we're resetting the phase. I was doing this because I was previously hearing
 //                                  pulses caused by the phase resets, but I think this was before I started resetting the phase to 270 instead of 0.
+//  1.60      10-17-26  KF8DIA      The code was not configuring the NMEA data from the Adafruit. Implemented this.
 
 #include <_Teensy.h>
 #include <Arduino.h>
@@ -185,6 +186,7 @@ void setup() {
   digitalWrite(AD9850_SGRST, HIGH);
   digitalWrite(AD9850_SGRST, LOW);
   digitalWrite(XMIT, LOW);
+  digitalWrite(GPS_TX_pin, HIGH);
 
   construct_station_ID_freqs();
 
@@ -210,12 +212,12 @@ void PPS_ISR() {
   current_minute = next_minute;
   current_hour = next_hour;
 
-  // Serial.print("Updated UTC time to ");
-  // Serial.print(current_hour);
-  // Serial.print(":");
-  // Serial.print(current_minute);
-  // Serial.print(":");
-  // Serial.println(current_second);
+  Serial.print("Updated UTC time to ");
+  Serial.print(current_hour);
+  Serial.print(":");
+  Serial.print(current_minute);
+  Serial.print(":");
+  Serial.println(current_second);
 
   // Serial.print("Previous time: ");
   // Serial.print(previous_minute);
@@ -234,6 +236,7 @@ void PPS_ISR() {
   // Serial.println("--------------------------------");
 
   if (current_second != (previous_second + 1) % 60 && (previous_minute != -1 && previous_second != -1 && previous_hour != -1)) {
+    Serial.println("time synchronization lost");
     raise_fault_flag();
   }
 
@@ -308,7 +311,7 @@ void PPS_ISR() {
     Serial.print(fault_minute);
     Serial.print(":");
     Serial.println(fault_second);
-    wdog1_software_reset();
+    // wdog1_software_reset();
   }
 
   //  If we have a GPS lock, we service the watchdog timer to ensure that as long as the system fault flag is not raised, we are servicing it once per second.
@@ -771,6 +774,14 @@ void loop() {
 
     NMEA_sentence_complete = false;
   }
+  if (load_GPS_TX_byte) {
+    uint8_t byte_to_load = TX_buffer_bytes.front();
+    // Serial.print("Loading character: ");
+    // Serial.println((char) byte_to_load);
+    TX_buffer_bytes.erase(TX_buffer_bytes.begin());
+    load_TX_buffer_bits(byte_to_load);
+    load_GPS_TX_byte = false;
+  }
   if (transmission_active) {
     digitalWrite(LED_indicator_red, 0);
     digitalWrite(LED_indicator_green, 1);
@@ -792,6 +803,6 @@ void loop() {
     Serial.print(fault_minute);
     Serial.print(":");
     Serial.println(fault_second);
-    wdog1_software_reset();
+    // wdog1_software_reset();
   }
 }
