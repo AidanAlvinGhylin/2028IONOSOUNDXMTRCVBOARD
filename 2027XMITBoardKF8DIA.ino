@@ -12,6 +12,8 @@
 //  1.50      10-17-26  KF8DIA      Modified PTT control to where we don't reset the XMIT when we're resetting the phase. I was doing this because I was previously hearing
 //                                  pulses caused by the phase resets, but I think this was before I started resetting the phase to 270 instead of 0.
 //  1.60      10-17-26  KF8DIA      The code was not configuring the NMEA data from the Adafruit. Implemented this.
+//  1.70      10-18-26  KF8DIA      Re-implemented automatic SRS on system hard fault. It still hard faults periodically, although not as often as it did previously, so I 
+//                                  still need to figure out what's causing this.
 
 #include <_Teensy.h>
 #include <Arduino.h>
@@ -177,7 +179,7 @@ void setup() {
   Serial.begin(115200);
 
   Serial.println("------------------------------");
-  Serial.println("2027XMITBoardKF8DIA.ino Rev. 1.0");
+  Serial.println("2027XMITBoardKF8DIA.ino Rev. 1.70");
   Serial.println("------------------------------");
 
   load_GPS_TX_buffer("$PMTK314,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0*29\r\n");                              //  PMTK314 (sets NMEA output) to only Global Positioning Fix Data (GGA) sentences
@@ -212,12 +214,12 @@ void PPS_ISR() {
   current_minute = next_minute;
   current_hour = next_hour;
 
-  Serial.print("Updated UTC time to ");
-  Serial.print(current_hour);
-  Serial.print(":");
-  Serial.print(current_minute);
-  Serial.print(":");
-  Serial.println(current_second);
+  // Serial.print("Updated UTC time to ");
+  // Serial.print(current_hour);
+  // Serial.print(":");
+  // Serial.print(current_minute);
+  // Serial.print(":");
+  // Serial.println(current_second);
 
   // Serial.print("Previous time: ");
   // Serial.print(previous_minute);
@@ -236,7 +238,7 @@ void PPS_ISR() {
   // Serial.println("--------------------------------");
 
   if (current_second != (previous_second + 1) % 60 && (previous_minute != -1 && previous_second != -1 && previous_hour != -1)) {
-    Serial.println("time synchronization lost");
+    // Serial.println("time synchronization lost");
     raise_fault_flag();
   }
 
@@ -249,7 +251,7 @@ void PPS_ISR() {
       if (current_second == 0 && (current_minute % 5 == 0)) {
         bool status = station_ID_timer.begin(station_ID_ISR, 49000);
         if (!status) {
-          Serial.println("station_ID_timer failed to start");
+          // Serial.println("station_ID_timer failed to start");
           raise_fault_flag();
         }
         load_AD9850_registers(station_ID_freqs[1], 192);
@@ -259,14 +261,14 @@ void PPS_ISR() {
       else if (current_second == 0) {
         bool status = UTC_tick_timer.begin(UTC_tick_ISR, 800000);
         if (!status) {
-          Serial.println("UTC_tick_timer failed to start");
+          // Serial.println("UTC_tick_timer failed to start");
           raise_fault_flag();
         }
       }
       else {
         bool status = UTC_tick_timer.begin(UTC_tick_ISR, 5000);
         if (!status) {
-          Serial.println("UTC_tick_timer failed to start");
+          // Serial.println("UTC_tick_timer failed to start");
           raise_fault_flag();
         }
       }
@@ -311,7 +313,7 @@ void PPS_ISR() {
     Serial.print(fault_minute);
     Serial.print(":");
     Serial.println(fault_second);
-    // wdog1_software_reset();
+    wdog1_software_reset();
   }
 
   //  If we have a GPS lock, we service the watchdog timer to ensure that as long as the system fault flag is not raised, we are servicing it once per second.
@@ -356,7 +358,7 @@ void GPS_RX_start() {
   GPIO7_IMR &= ~PIN_7_MASK;                                                   //  Reset the IMR bit corresponding to pin 7, so we don't interrupt on any data bits.
   bool status = GPS_RX_timer.begin(GPS_RX_ISR, 156);                          //  Begin the GPS_RX_ISR function at 156 us, which is 1.5 times the length of a single bit
   if (!status) {
-    Serial.println("GPS RX failed to start");
+    // Serial.println("GPS RX failed to start");
     raise_fault_flag();
   }
   GPS_RX_timer.update(104);                                                   //  The GPS_RX_ISR should fire after 156 us for the first bit, and then after 104 us for all subsequent bits.
@@ -461,7 +463,7 @@ void load_GPS_TX_buffer(const std::string msg) {
     // GPS_TX_start_bit = true;                                                  //  Set this flag high to indicate that the first bit that needs to be transmitted is a start bit.
     bool status = GPS_TX_timer.begin(GPS_TX_ISR, 104);             //  Begin the GPS_TX_timer at 104 us (the period corresponding to 9600 baud)
     if (!status) {
-      Serial.println("GPS TX failed to start");
+      // Serial.println("GPS TX failed to start");
       raise_fault_flag();
     }
   }
@@ -725,7 +727,7 @@ void wdog1_serv() {
 
 //  Routine to assert a chip reset in software
 void wdog1_software_reset() {
-  Serial.println("Attempting to assert WDT1 software reset...");
+  // Serial.println("Attempting to assert WDT1 software reset...");
   WDOG1_WCR &= ~(1 << 4);                 //  Reset bit 1 of the WCR to assert a reset from software.
 }
 
@@ -803,6 +805,6 @@ void loop() {
     Serial.print(fault_minute);
     Serial.print(":");
     Serial.println(fault_second);
-    // wdog1_software_reset();
+    wdog1_software_reset();
   }
 }
