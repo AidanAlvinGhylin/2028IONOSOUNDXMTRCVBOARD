@@ -14,6 +14,7 @@
 //  1.60      10-17-26  KF8DIA      The code was not configuring the NMEA data from the Adafruit. Implemented this.
 //  1.70      10-18-26  KF8DIA      Re-implemented automatic SRS on system hard fault. It still hard faults periodically, although not as often as it did previously, so I 
 //                                  still need to figure out what's causing this.
+//  1.80      10-19-26  KF8DIA      Fixed silly PTT pin configuration error.
 
 #include <_Teensy.h>
 #include <Arduino.h>
@@ -170,6 +171,7 @@ void setup() {
   pinMode(18, OUTPUT);
   pinMode(19, OUTPUT);
   pinMode(20, OUTPUT);
+  pinMode(21, OUTPUT);
 
   //  Reserve memory space for the extracted UTC values, to avoid heap allocation problems
   extracted_minute.reserve(2);
