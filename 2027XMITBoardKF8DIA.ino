@@ -15,6 +15,7 @@
 //  1.70      10-18-26  KF8DIA      Re-implemented automatic SRS on system hard fault. It still hard faults periodically, although not as often as it did previously, so I 
 //                                  still need to figure out what's causing this.
 //  1.80      10-19-26  KF8DIA      Fixed silly PTT pin configuration error.
+//  1.90      10-20-26  KF8DIA      Removed automatic system reset when GPS signal drifts in and out.
 
 #include <_Teensy.h>
 #include <Arduino.h>
@@ -239,10 +240,10 @@ void PPS_ISR() {
   // Serial.println(system_fault_flag);
   // Serial.println("--------------------------------");
 
-  if (current_second != (previous_second + 1) % 60 && (previous_minute != -1 && previous_second != -1 && previous_hour != -1)) {
-    // Serial.println("time synchronization lost");
-    raise_fault_flag();
-  }
+  // if (current_second != (previous_second + 1) % 60 && (previous_minute != -1 && previous_second != -1 && previous_hour != -1)) {
+  //   Serial.println("time synchronization lost");
+  //   raise_fault_flag();
+  // }
 
   //  Temporarily commenting this out as the Teensy is having problems that I am figuring out
   // current_second = next_second;
@@ -304,7 +305,7 @@ void PPS_ISR() {
     loop_stopped_running = true;
   }
   else {
-    // Serial.println("main loop stopped running");
+    Serial.println("main loop stopped running");
     raise_fault_flag();
     digitalWrite(LED_indicator_red, 1);
     digitalWrite(LED_indicator_green, 0);
