@@ -16,6 +16,7 @@
 //                                  still need to figure out what's causing this.
 //  1.80      10-19-26  KF8DIA      Fixed silly PTT pin configuration error.
 //  1.90      10-20-26  KF8DIA      Removed automatic system reset when GPS signal drifts in and out.
+//  1.20      10-24-26  KF8DIA      Changed origin call sign from W8EDU/EA to W8EDU/B, as this will run as a Beacon station in the United States
 
 #include <_Teensy.h>
 #include <Arduino.h>
@@ -140,7 +141,7 @@ volatile bool station_ID_stop_flag = false;
 unsigned int station_ID_carrier_freq = 3006477;               //  700 Hz
 std::vector<unsigned int> station_ID_freqs = {}; 
 unsigned int station_ID_phase = 192;                          //  270 degrees
-std::string morse_ID_raw = ".-- ---.. . -.. ..- -..-. . .-";  //  Raw morse ID string. Used to construct the freqs array.
+std::string morse_ID_raw = ".-- ---.. . -.. ..- -..-. -...";  //  Raw morse ID string. Used to construct the freqs array.
 volatile bool station_ID_active = false;
 
 //  System fault flag, raised if any errors occur.
