@@ -16,7 +16,8 @@
 //                                  still need to figure out what's causing this.
 //  1.80      10-19-26  KF8DIA      Fixed silly PTT pin configuration error.
 //  1.90      10-20-26  KF8DIA      Removed automatic system reset when GPS signal drifts in and out.
-//  1.20      10-24-26  KF8DIA      Changed origin call sign from W8EDU/EA to W8EDU/B, as this will run as a Beacon station in the United States
+//  1.100     10-24-26  KF8DIA      Changed origin call sign from W8EDU/EA to W8EDU/B, as this will run as a Beacon station in the United States
+//  1.110     10-24-26  KF8DIA      Fixed issue with latency in beginning of transmission after GPS lock is detected.
 
 #include <_Teensy.h>
 #include <Arduino.h>
@@ -209,6 +210,9 @@ void PPS_ISR() {
   // Serial.println(transmission_active);
   //  This value needs to be incremented every time, whether we have a GPS signal or not.
   GPS_fix_PPS_counter++;
+  
+  //  If this pin pulses, that must mean we have a lock.
+  GPS_lock = true;
 
   previous_second = current_second;
   previous_minute = current_minute;
