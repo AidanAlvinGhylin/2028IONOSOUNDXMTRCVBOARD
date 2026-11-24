@@ -18,6 +18,7 @@
 //  1.90      10-20-26  KF8DIA      Removed automatic system reset when GPS signal drifts in and out.
 //  1.100     10-24-26  KF8DIA      Changed origin call sign from W8EDU/EA to W8EDU/B, as this will run as a Beacon station in the United States
 //  1.110     10-24-26  KF8DIA      Fixed issue with latency in beginning of transmission after GPS lock is detected.
+//  1.120     11-23-26  KF8DIA      Fixed other firmware bugs.
 
 #include <_Teensy.h>
 #include <Arduino.h>
@@ -25,6 +26,7 @@
 #include <string>
 #include <cmath>
 #include <vector>
+#include <arm_math.h>
 
 //  Hardware timer definitions
 IntervalTimer GPS_RX_timer;
@@ -68,7 +70,7 @@ volatile bool transmission_active = false;                                    //
 
 //  NMEA byte receiving structure. Individual bits are clocked in to a buffer array of length 8. Once we have a full byte, the byte is loaded into a dynamic array and printed.
 
-std::array<int, 8> RX_buffer = {};
+volatile bool RX_buffer[8];
 volatile int RX_buffer_pointer = 0;
 
 volatile char current_sentence[100];                                          //  Fixed 100-byte array, used to construct the NMEA sentence coming in from the GPS receiver.
@@ -78,7 +80,9 @@ volatile uint8_t received_byte;
 
 //  NMEA byte transmitting structure.
 
-std::vector<uint8_t> TX_buffer_bytes;                                         //  Use this buffer to store all ASCII characters that need to be transmitted to the GPS receiver.
+volatile uint8_t TX_buffer_bytes[256];                                        //  Use this as a FIFO to store all ASCII characters that need to be transmitted to the GPS receiver.
+volatile int TX_buffer_bytes_head_pointer = 0;                                //  Head pointer for the FIFO
+volatile int TX_buffer_bytes_tail_pointer = 0;                                //  Tail pointer for the FIFO
 std::array<int, 8> TX_buffer_bits = {};                                       //  Use this buffer to store all the bits of the byte currently being transmitted to the GPS receiver.
 volatile int TX_buffer_bits_pointer = 0;                                      
 volatile bool GPS_TX_active = false;                                          //  Flag to indicate whether we're transmitting to the GPS receiver.
@@ -155,6 +159,12 @@ volatile int fault_hour = -1;
 volatile int fault_minute = -1;
 volatile int fault_second = -1;
 
+//  UTC second stoppage fault detection counter. If UTC second stops advancing for 20 seconds, we trigger the fault flag.
+volatile int second_fault_timeout_counter = 0;
+
+//  Interrupt enabling/disabling structure
+volatile uint32_t stored_IMR = 0;
+
 void setup() {
   // put your setup code here, to run once:
   attachInterrupt(GPS_RX_pin, GPS_RX_start, FALLING);
@@ -184,7 +194,7 @@ void setup() {
   Serial.begin(115200);
 
   Serial.println("------------------------------");
-  Serial.println("2027XMITBoardKF8DIA.ino Rev. 1.70");
+  Serial.println("2027XMITBoardKF8DIA.ino Rev. 1.120");
   Serial.println("------------------------------");
 
   load_GPS_TX_buffer("$PMTK314,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0*29\r\n");                              //  PMTK314 (sets NMEA output) to only Global Positioning Fix Data (GGA) sentences
@@ -201,6 +211,18 @@ void setup() {
 
   //  Initiate the watchdog timer with a timeout of 10 seconds to automatically reset the system in the event of a fault.
   wdog1_init(19);
+}
+
+//  This function was written by ChatGPT. The Teensyduino library does not include primask operations in its hardware abstraction layer.
+static inline uint32_t get_primask() {
+  uint32_t primask;
+  __asm__ volatile ("MRS %0, primask" : "=r" (primask));
+  return primask;
+}
+
+//  This function was also written by ChatGPT.
+static inline void set_primask(uint32_t primask) {
+  __asm__ volatile ("MSR primask, %0" :: "r" (primask) : "memory");
 }
 
 void PPS_ISR() {
@@ -250,6 +272,20 @@ void PPS_ISR() {
   //   raise_fault_flag();
   // }
 
+  //  Check to see if UTC second has stopped advancing; if the issue persists after 20 seconds, we raise the system fault flag
+  if (current_second == previous_second) {
+    second_fault_timeout_counter++;                                   //  Increment this counter every second the UTC second value is not advancing properly.
+  }
+  else {
+    second_fault_timeout_counter = 0;                                 //  Reset this counter if the UTC second is advancing properly.
+  }
+  //  If this issue has persisted for 20 seconds, raise the fault flag.
+  if (second_fault_timeout_counter >= 20) {
+    raise_fault_flag();
+    wdog1_software_reset();
+    return;
+  }
+
   //  Temporarily commenting this out as the Teensy is having problems that I am figuring out
   // current_second = next_second;
   if (!station_ID_active) {
@@ -257,7 +293,7 @@ void PPS_ISR() {
       digitalWrite(XMIT, HIGH);
       toggle_AD9850_FQ_UD();
       if (current_second == 0 && (current_minute % 5 == 0)) {
-        bool status = station_ID_timer.begin(station_ID_ISR, 49000);
+        bool status = station_ID_timer.begin(station_ID_ISR, 64000);
         if (!status) {
           // Serial.println("station_ID_timer failed to start");
           raise_fault_flag();
@@ -361,45 +397,70 @@ void GPS_fix_ISR() {
 }
 
 void GPS_RX_start() {
-  RX_buffer = {};                                                             //  Make sure the RX buffer is clear before we begin clocking in bits
+  digitalWrite(FreqUp_diagnostic_pin, HIGH);
+  // Serial.println("Entering GPS_RX_start()");
   RX_buffer_pointer = 0;                                                      //  Reset the RX buffer pointer
   GPIO7_IMR &= ~PIN_7_MASK;                                                   //  Reset the IMR bit corresponding to pin 7, so we don't interrupt on any data bits.
   bool status = GPS_RX_timer.begin(GPS_RX_ISR, 156);                          //  Begin the GPS_RX_ISR function at 156 us, which is 1.5 times the length of a single bit
   if (!status) {
     // Serial.println("GPS RX failed to start");
+    GPIO7_ISR = PIN_7_MASK;
+    GPIO7_IMR |= PIN_7_MASK;
+
     raise_fault_flag();
+
+    digitalWrite(FreqUp_diagnostic_pin, LOW);
+    return;
   }
   GPS_RX_timer.update(104);                                                   //  The GPS_RX_ISR should fire after 156 us for the first bit, and then after 104 us for all subsequent bits.
+  digitalWrite(FreqUp_diagnostic_pin, LOW);
 }
 
 void GPS_RX_ISR() {
+  digitalWrite(FreqDown_diagnostic_pin, HIGH);
+  // Serial.println("Entering GPS_RX_ISR()");
   RX_buffer[RX_buffer_pointer] = digitalRead(GPS_RX_pin);                     //  Read the bit on the TX line using digitalRead()
   RX_buffer_pointer++;                                                        //  Increment the RX_buffer_pointer
   //  Check if that was the last data bit.
-  if (RX_buffer_pointer == RX_buffer.size()) {                  
+  if (RX_buffer_pointer >= 8) {                  
     GPS_RX_timer.end();                                                       //  Stop the timer if that is the case.
     RX_buffer_pointer = 0;                                                    //  Reset the RX buffer pointer.
     GPIO7_ISR = PIN_7_MASK;                                                   //  Set the ISR bit corresponding to the interrupt on pin 7.
     GPIO7_IMR |= PIN_7_MASK;                                                  //  Also the IMR bit corresponding to the interrupt on pin 7, so that we interrupt on the next start bit.
 
-    received_byte = construct_byte(RX_buffer);                                //  Construct the byte value from the eight bits.
+    received_byte = construct_byte();                                         //  Construct the byte value from the eight bits.
     if (received_byte == 36) {
       NMEA_sentence_complete = true;
       current_sentence[current_sentence_index] = '\0';                        //  Null terminate the current sentence.
 
-      memcpy(previous_sentence, current_sentence, 100);
+      //  Make sure we save the interrupt state before we disable IRQ
+      uint32_t primask = get_primask();                                     
+      __disable_irq();
+
+      memcpy(previous_sentence, current_sentence, 100);                       //  Safe memory transfer of received sentence. We make sure current_sentence cannot be modified in the ISR while doing this.
+      current_sentence_index = 0;
+      
+      //  Restore the previous global interrupt state
+      set_primask(primask);
+    }
+    if (current_sentence_index < 100) {                                       //  Check to make sure current_sentence isn't overflowing; if it is, wrap back around to the beginning of the array.
+      current_sentence[current_sentence_index] = (char) received_byte;
+      current_sentence_index++;
+    }
+    else {
       current_sentence_index = 0;
     }
-    current_sentence[current_sentence_index] = (char) received_byte;
-    current_sentence_index++;
   }
+  digitalWrite(FreqDown_diagnostic_pin, LOW);
 }
 
-uint8_t construct_byte(const std::array<int, 8>& bits) {
+uint8_t construct_byte() {
   unsigned int result = 0;
   unsigned int bit_scaler = 1;
-  for (int i = 0; i < bits.size(); i++) {
-    result += bits[i] * bit_scaler;
+  for (int i = 0; i < 8; i++) {
+    if (RX_buffer[i]) {
+      result += bit_scaler;
+    }
     bit_scaler *= 2;                                                          //  Scale this by 2 every bit to do the addition correctly.
   }
   return result;
@@ -435,7 +496,7 @@ void GPS_TX_ISR() {
     // digitalWrite(FreqDown_diagnostic_pin, LOW);
   }
   //  Otherwise, check if TX_buffer_bytes has any bytes that need to be transmitted. We first transmit a start bit and load TX_buffer_bits with the first byte in TX_buffer bytes.
-  else if (!TX_buffer_bytes.empty() && !load_GPS_TX_byte) {
+  else if ((TX_buffer_bytes_head_pointer != TX_buffer_bytes_tail_pointer) && !load_GPS_TX_byte) {
     //  Toggle FreqDown_diagnostic_pin if we're transmitting a start bit
     // digitalWrite(FreqDown_diagnostic_pin, HIGH);
 
@@ -459,12 +520,21 @@ void load_GPS_TX_buffer(const std::string msg) {
 
   for (char c : msg) {
     uint8_t corresponding_byte = (uint8_t) c;                                         //  Convert the ASCII character to a byte
-    TX_buffer_bytes.push_back(corresponding_byte);                                  //  Load this byte into the TX buffer
+    
+    TX_buffer_bytes[TX_buffer_bytes_tail_pointer] = corresponding_byte;               //  Load this byte into the TX buffer
+    TX_buffer_bytes_tail_pointer += 1;                                                //  Increment the tail pointer every time we add a byte to the FIFO
+    TX_buffer_bytes_tail_pointer %= 256;                                              //  Take the tail pointer modulus of 256 to make sure we don't exceed the limits of the array
   }
 
-  //  Add carriage return and line feed
-  TX_buffer_bytes.push_back((uint8_t) 13);                                    //  Carriage return
-  TX_buffer_bytes.push_back((uint8_t) 10);                                    //  Line feed
+  //  Add carriage return
+  TX_buffer_bytes[TX_buffer_bytes_tail_pointer] = ((uint8_t) 13);                     //  ASCII carriage return
+  TX_buffer_bytes_tail_pointer += 1;                                                  //  Increment the tail pointer every time we add a byte to the FIFO
+  TX_buffer_bytes_tail_pointer %= 256;                                                //  Take the tail pointer modulus of 256 to make sure we don't exceed the limits of the array
+  
+  
+  TX_buffer_bytes[TX_buffer_bytes_tail_pointer] = ((uint8_t) 10);                     //  ASCII line feed
+  TX_buffer_bytes_tail_pointer += 1;                                                  //  Increment the tail pointer every time we add a byte to the FIFO
+  TX_buffer_bytes_tail_pointer %= 256;                                                //  Take the tail pointer modulus of 256 to make sure we don't exceed the limits of the array
 
   if (!GPS_TX_active) {
     GPS_TX_active = true;                                                     //  Set the GPS_TX_active flag
@@ -724,12 +794,16 @@ void wdog1_init(uint8_t timeout) {
 
 //  Services the watchdog timer
 void wdog1_serv() {
-  //  We don't want any interrupts to fire while we're servicing the watchdog timer
+  //  We don't want any interrupts to fire while we're servicing the watchdog timer. Save the global interrupt state.
+  uint32_t primask = get_primask();
   __disable_irq();
+
   //  To service WDT1 on the Teensy 4.0, we need to set the WSR to 0x5555 and then 0xAAAA.
   WDOG1_WSR = 21845;                  //  Set the WSR to 0x5555
   WDOG1_WSR = 43690;                  //  Set the WSR to 0xAAAA
-  __enable_irq();
+
+  //  Restore the global interrupt state.
+  set_primask(primask);
   // Serial.println("Servicing WDT1");
 }
 
@@ -747,48 +821,83 @@ void raise_fault_flag() {
   fault_second = current_second;
 }
 
+//  Clears the IMR register to disable all interrupts; saves the current value of the IMR register for when interrupts are re-enabled
+void disable_interrupts() {
+  //  Make sure that there are interrupts to disable
+  if (stored_IMR == 0) {
+    stored_IMR = GPIO7_IMR;
+    GPIO7_IMR = 0;
+  }
+}
+
+//  Sets the IMR register to re-enable all interrupts that had been previously disabled.
+void enable_interrupts() {
+  //  Make sure there are interrupts to enable
+  if (stored_IMR != 0) {
+    GPIO7_IMR = stored_IMR;
+    stored_IMR = 0;
+  }
+}
+
 void loop() {
   loop_started_running = true;
   loop_stopped_running = false;
 
   // Serial.println("Entering loop()");
   if (NMEA_sentence_complete) {
-    extracted_hour.push_back(previous_sentence[7]);
-    extracted_hour.push_back(previous_sentence[7]);
-    extracted_minute.push_back(previous_sentence[9]);
-    extracted_minute.push_back(previous_sentence[10]);
-    extracted_second.push_back(previous_sentence[11]);
-    extracted_second.push_back(previous_sentence[12]);
+    // Serial.print("Detected NMEA_sentence_complete = true in main loop. ");
+    //  Before extracting the timestamp, we make sure that the NMEA data is not corrupted by checking all of the characters we expect to be digits.
+    if (isdigit(previous_sentence[7]) & isdigit(previous_sentence[8]) & isdigit(previous_sentence[9]) & isdigit(previous_sentence[10]) & isdigit(previous_sentence[11]) & isdigit(previous_sentence[12])) {
+      // Serial.println("Sentence framing is valid. Parsing sentence...");
+      //  If they are all digits, 
+      extracted_hour.push_back(previous_sentence[7]);
+      extracted_hour.push_back(previous_sentence[8]);
+      extracted_minute.push_back(previous_sentence[9]);
+      extracted_minute.push_back(previous_sentence[10]);
+      extracted_second.push_back(previous_sentence[11]);
+      extracted_second.push_back(previous_sentence[12]);
 
-    next_second = (std::stoi(extracted_second) + 1) % 60;
-    if (next_second == 0) {
-      // Serial.println("Detected that next_second == 0");
-      next_minute = (std::stoi(extracted_minute) + 1) % 60;
-      // Serial.print("Setting next_minute to ");
-      // Serial.println(next_minute);
-      if (next_minute == 0) {
-        next_hour = (std::stoi(extracted_hour) + 1) % 60;
+      next_second = (std::stoi(extracted_second) + 1) % 60;
+
+      //  We make sure next_second, next_minute and next_hour cannot be modified in any ISR while updating them. Save the global interrupt context.
+      uint32_t primask = get_primask();
+      __disable_irq();
+
+      if (next_second == 0) {
+        // Serial.println("Detected that next_second == 0");
+        next_minute = (std::stoi(extracted_minute) + 1) % 60;
+        // Serial.print("Setting next_minute to ");
+        // Serial.println(next_minute);
+        if (next_minute == 0) {
+          next_hour = (std::stoi(extracted_hour) + 1) % 24;
+        }
+        else {
+          next_hour = std::stoi(extracted_hour);
+        }
       }
       else {
+        next_minute = std::stoi(extracted_minute);
         next_hour = std::stoi(extracted_hour);
       }
-    }
-    else {
-      next_minute = std::stoi(extracted_minute);
-      next_hour = std::stoi(extracted_hour);
-    }
 
-    extracted_hour.clear();
-    extracted_minute.clear();
-    extracted_second.clear();
+      //  Restore the global interrupt context.
+      set_primask(primask);
 
-    NMEA_sentence_complete = false;
+      extracted_hour.clear();
+      extracted_minute.clear();
+      extracted_second.clear();
+
+      NMEA_sentence_complete = false;
+    }
   }
   if (load_GPS_TX_byte) {
-    uint8_t byte_to_load = TX_buffer_bytes.front();
+    //  Poll the top byte from the FIFO
+    uint8_t byte_to_load = TX_buffer_bytes[TX_buffer_bytes_head_pointer];             //  The top byte in the FIFO
+    TX_buffer_bytes_head_pointer += 1;                                                //  Increment the head pointer every time we poll from the FIFO
+    TX_buffer_bytes_head_pointer %= 256;                                              //  Take the head pointer modulus of 256 to make sure we don't exceed the limits of the array
+
     // Serial.print("Loading character: ");
     // Serial.println((char) byte_to_load);
-    TX_buffer_bytes.erase(TX_buffer_bytes.begin());
     load_TX_buffer_bits(byte_to_load);
     load_GPS_TX_byte = false;
   }
