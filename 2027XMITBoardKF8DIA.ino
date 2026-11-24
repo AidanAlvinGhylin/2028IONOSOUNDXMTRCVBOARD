@@ -280,7 +280,7 @@ void PPS_ISR() {
     second_fault_timeout_counter = 0;                                 //  Reset this counter if the UTC second is advancing properly.
   }
   //  If this issue has persisted for 20 seconds, raise the fault flag.
-  if (second_fault_timeout_counter >= 20) {
+  if (second_fault_timeout_counter >= 5) {
     raise_fault_flag();
     wdog1_software_reset();
     return;
